@@ -1,0 +1,16 @@
+# 敏感信息
+*.log
+used-keys.log
+/tmp/
+
+# 密钥池
+keys-*.txt
+!keys-example.txt
+
+# 本地配置
+.env
+.env.local
+config.local.json
+
+# 浏览器 profile (含登录态)
+.chrome-profile/

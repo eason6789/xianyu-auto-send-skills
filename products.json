@@ -1,0 +1,34 @@
+{
+  "_example_link": {
+    "name": "网盘资料示例",
+    "delivery": {
+      "type": "link",
+      "message": "你好！资料已发到网盘\n链接：{{link}}\n提取码：{{code}}\n请及时下载，祝您使用愉快！",
+      "link": "https://pan.baidu.com/s/xxxxxxxxx",
+      "code": "xxxx"
+    }
+  },
+  "_example_keypool": {
+    "name": "激活码示例 (秘钥池)",
+    "delivery": {
+      "type": "keypool",
+      "message": "您的激活码：{{key}}，祝您使用愉快！",
+      "keypoolFile": "keys-example.txt"
+    }
+  },
+  "_example_fixed": {
+    "name": "固定内容示例",
+    "delivery": {
+      "type": "fixed",
+      "message": "您的内容：XXXX-XXXX-XXXX，有问题随时联系！"
+    }
+  },
+  "_example_api": {
+    "name": "API发货示例",
+    "delivery": {
+      "type": "api",
+      "message": "查询结果：{{result}}",
+      "apiUrl": "http://your-api-server/issue?type=vip"
+    }
+  }
+}

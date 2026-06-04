@@ -1,0 +1,6 @@
+{
+  "legacyProfile": "/path/to/existing/browser/profile",
+  "feishuAppId": "cli_xxxxxxxxxxxxxx",
+  "feishuAppSecret": "xxxxxxxxxxxxxxxxxxxxxx",
+  "feishuChatId": "oc_xxxxxxxxxxxxxxxxxxxxxx"
+}
