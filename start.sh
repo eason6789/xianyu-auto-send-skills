@@ -21,8 +21,7 @@ export DISPLAY=:99
 
 # 3. 运行主脚本
 cd "$DIR"
-exec /opt/node-v22.22.1-linux-x64/bin/node "$DIR/xianyu-ship.js" 2>&1 | tee -a "$LOG_FILE"
-
-EXIT_CODE=$?
+/opt/node-v22.22.1-linux-x64/bin/node "$DIR/xianyu-ship.js" 2>&1 | tee -a "$LOG_FILE"
+EXIT_CODE=${PIPESTATUS[0]}
 echo "[$(date '+%Y-%m-%d %H:%M:%S')] ========== 闲鱼自动发货 END (exit: $EXIT_CODE) ==========" >> "$LOG_FILE"
 exit $EXIT_CODE

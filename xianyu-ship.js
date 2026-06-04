@@ -12,7 +12,7 @@
 // - 风控自动检测 + 飞书通知
 // - MTop 虚拟发货 API 签名
 
-const { chromium } = require('playwright');
+const { chromium, request } = require('playwright');
 const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
@@ -46,7 +46,7 @@ const CONFIG = {
   // MTop API
   mtopAppKey: '12574478',
   mtopApi: 'mtop.taobao.idle.logistic.consign.dummy',
-  mtopUrl: 'https://api.goofish.com/h5/mtop.taobao.idle.logistic.consign.dummy/1.0/',
+  mtopUrl: 'https://h5api.m.goofish.com/h5/mtop.taobao.idle.logistic.consign.dummy/1.0/',
   // 超时
   timeout: 30000,
 };
@@ -234,6 +234,36 @@ function hasLoginRequired(text, pageUrl) {
 }
 
 /**
+ * 检查订单是否已发货/已完成
+ * @param {object} orderPage - 订单详情页
+ * @returns {string} 'pending' | 'shipped' | 'completed' | 'unknown'
+ */
+async function checkOrderStatus(orderPage) {
+  const status = await orderPage.evaluate(() => {
+    const text = document.body.innerText || '';
+
+    // 有"去评价"按钮 → 订单已完成
+    if (/去评价/.test(text)) return 'completed';
+
+    // 查找状态进度条中的当前/高亮状态
+    const allEls = document.querySelectorAll('span, div, li, [class*="status"], [class*="step"], [class*="progress"]');
+    for (const el of allEls) {
+      const t = (el.textContent || '').trim();
+      const cls = (el.className || '').toString();
+      const isActive = /active|current|selected|highlight|finish/i.test(cls);
+      if (isActive && /已发货|交易成功|交易关闭/.test(t)) return 'shipped';
+    }
+
+    // 兜底：检查页面是否有发货相关按钮
+    if (/去发货|确认发货|立即发货/.test(text)) return 'pending';
+
+    return 'unknown';
+  });
+
+  return status;
+}
+
+/**
  * 从页面文本中检测待发货订单
  * 返回买家昵称列表（或空数组）
  */
@@ -263,19 +293,17 @@ function findPendingOrders(text) {
  * @param {string} orderId - 订单号
  */
 async function callShippingAPI(page, orderId) {
-  // 1. 从 goofish.com 域获取 _m_h5_tk
-  const cookies = await page.context().cookies('https://www.goofish.com');
-  const mh5tkCookie = cookies.find(c => c.name === '_m_h5_tk');
+  // 使用 Playwright APIRequestContext (共享浏览器 storage state, 正确处理 cookies)
+  const storageState = await page.context().storageState();
+  const apiContext = await request.newContext({ storageState });
 
-  if (!mh5tkCookie || !mh5tkCookie.value) {
-    throw new Error('未找到 _m_h5_tk cookie，可能未登录');
-  }
+  // 从 storage state 中找到 _m_h5_tk
+  const mh5tkEntry = storageState.cookies.find(c => c.name === '_m_h5_tk');
+  if (!mh5tkEntry) throw new Error('未找到 _m_h5_tk cookie，可能未登录');
 
-  const mh5tk = mh5tkCookie.value;
-  const token = mh5tk.split('_')[0]; // token 是下划线前面的部分
+  const token = mh5tkEntry.value.split('_')[0];
   const timestamp = Date.now();
 
-  // 2. 构造请求参数
   const data = JSON.stringify({
     orderId: orderId,
     tradeText: '',
@@ -283,34 +311,29 @@ async function callShippingAPI(page, orderId) {
     newUnconsign: true,
   });
 
-  // 3. MD5 签名: md5(token + "&" + timestamp + "&" + appKey + "&" + data)
   const signStr = `${token}&${timestamp}&${CONFIG.mtopAppKey}&${data}`;
   const sign = md5(signStr);
 
-  // 4. 拼接 cookie 字符串
-  const cookieStr = cookies
-    .filter(c => c.domain && c.domain.includes('goofish.com'))
-    .map(c => `${c.name}=${c.value}`)
-    .join('; ');
+  log(`  token: ${token.slice(0, 20)}...`);
+  log(`  sign: ${sign.slice(0, 20)}...`);
 
-  // 5. 发请求 (在页面上下文中执行，复用 cookie)
-  const result = await page.evaluate(async ({ url, params, cookieStr }) => {
-    const resp = await fetch(url, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/x-www-form-urlencoded',
-        'Cookie': cookieStr,
-      },
-      body: new URLSearchParams(params).toString(),
-    });
-    return await resp.text();
-  }, {
-    url: CONFIG.mtopUrl,
-    params: { data, sign, t: String(timestamp), appKey: CONFIG.mtopAppKey, api: CONFIG.mtopApi, v: '1.0', type: 'originaljson', dataType: 'json' },
-    cookieStr,
+  const params = new URLSearchParams({
+    data, sign, t: String(timestamp), appKey: CONFIG.mtopAppKey,
+    api: CONFIG.mtopApi, v: '1.0', type: 'originaljson', dataType: 'json'
   });
 
-  log(`  API 响应: ${result.slice(0, 300)}`);
+  const resp = await apiContext.post(CONFIG.mtopUrl, {
+    headers: {
+      'Content-Type': 'application/x-www-form-urlencoded',
+      'Origin': 'https://www.goofish.com',
+      'Referer': 'https://www.goofish.com/',
+    },
+    data: params.toString(),
+  });
+
+  const result = await resp.text();
+  await apiContext.dispose();
+  log(`  API 响应: ${result.slice(0, 400)}`);
   return result;
 }
 
@@ -466,42 +489,72 @@ async function main() {
     log(`📋 发现 ${pendingOrders.length} 个待发货标识`);
 
     // === 逐条处理 ===
-    // 重新 snapshot 获取交互元素
-    const snapshot = await page.evaluate(() => {
-      // 查找所有"去发货"按钮附近的文本块
-      const buttons = document.querySelectorAll('button, [role="button"], .button, a');
-      const result = [];
-      buttons.forEach((btn, i) => {
-        const text = btn.textContent?.trim() || '';
-        if (text.includes('去发货')) {
-          result.push({ index: i, text, rect: btn.getBoundingClientRect() });
+    // 在会话列表中找出所有带 "等待卖家发货" 的会话，逐一点击进入
+    const pendingConvs = await page.evaluate(() => {
+      const items = document.querySelectorAll('[class*="conversation-item"]');
+      const results = [];
+      for (const item of items) {
+        const text = item.textContent || '';
+        if (text.includes('等待卖家发货') || text.includes('等待你发货')) {
+          results.push({
+            text: text.slice(0, 120),
+            hasWaitTag: true
+          });
         }
-      });
-      return result;
+      }
+      return results;
     });
 
-    log(`  找到 ${snapshot.length} 个"去发货"按钮`);
+    log(`  其中 ${pendingConvs.length} 个会话有待发货订单`);
 
-    for (let i = 0; i < snapshot.length; i++) {
+    for (let i = 0; i < pendingConvs.length; i++) {
       try {
-        log(`\n📦 处理第 ${i + 1}/${snapshot.length} 个订单...`);
+        log(`\n📦 处理第 ${i + 1}/${pendingConvs.length} 个订单...`);
 
-        // 刷新按钮引用 (页面可能已变化)
-        const btns = await page.$$('button, [role="button"]');
-        const targetBtns = [];
-        for (const btn of btns) {
-          const t = await btn.textContent();
-          if (t && t.includes('去发货')) targetBtns.push(btn);
+        // 重新获取会话列表元素（页面可能变化），点击对应会话
+        const convItems = await page.$$('[class*="conversation-item"]');
+        let clicked = false;
+        for (const item of convItems) {
+          const t = await item.textContent();
+          if (t && (t.includes('等待卖家发货') || t.includes('等待你发货'))) {
+            await item.click();
+            await sleep(3000);
+            clicked = true;
+            break;
+          }
         }
 
-        if (targetBtns.length <= i) {
-          log('  ⚠️ 按钮已消失，跳过');
+        if (!clicked) {
+          log('  ⚠️ 未能点击会话，跳过');
           continue;
         }
 
-        // 点击"去发货"
-        await targetBtns[i].click();
-        await sleep(3000);
+        // 此时应进入聊天详情，查找"去发货"按钮
+        const shipBtn = await page.$('text=去发货');
+        if (!shipBtn) {
+          // 尝试更宽泛的查找
+          const allBtns = await page.$$('button, [role="button"], a, span, div');
+          let found = false;
+          for (const btn of allBtns) {
+            const t = await btn.textContent();
+            if (t && t.trim() === '去发货') {
+              await btn.click();
+              await sleep(3000);
+              found = true;
+              break;
+            }
+          }
+          if (!found) {
+            log('  ⚠️ 未找到"去发货"按钮，跳过');
+            // 回到IM列表
+            await page.goto(CONFIG.chatUrl, { waitUntil: 'domcontentloaded', timeout: 10000 });
+            await sleep(2000);
+            continue;
+          }
+        } else {
+          await shipBtn.click();
+          await sleep(3000);
+        }
 
         // 检查是否打开了新标签页
         const pages = context.pages();
@@ -517,6 +570,17 @@ async function main() {
         }
         const orderId = orderIdMatch[1];
         log(`  📋 订单号: ${orderId}`);
+
+        // 检查订单是否已完成/已发货
+        const orderStatus = await checkOrderStatus(orderPage);
+        log(`  📊 订单状态: ${orderStatus}`);
+        if (orderStatus === 'completed' || orderStatus === 'shipped') {
+          log(`  ⏭️ 订单已完成/已发货，跳过`);
+          await orderPage.close();
+          await page.goto(CONFIG.chatUrl, { waitUntil: 'domcontentloaded', timeout: 10000 });
+          await sleep(2000);
+          continue;
+        }
 
         // 从页面提取商品 ID
         const orderPageText = await orderPage.evaluate(() => document.body.innerText || '');
@@ -536,6 +600,12 @@ async function main() {
           if (itemIdMatch && PRODUCTS[itemIdMatch[1]]) {
             productId = itemIdMatch[1];
           }
+        }
+
+        // 兜底：只有1个货品时，直接使用
+        if (!productId && activeProducts.length === 1) {
+          productId = activeProducts[0];
+          log(`  💡 仅1个货品，默认使用: ${PRODUCTS[productId].name}`);
         }
 
         if (!productId) {
@@ -606,14 +676,21 @@ async function main() {
           log(`  ⚠️ 无法生成发货内容 (可能是秘钥池已空或API无响应)`);
         }
 
-        // 关闭订单详情页
-        await orderPage.close();
+        // 关闭订单详情页，回到 IM 列表
+        if (!orderPage.isClosed()) {
+          await orderPage.close();
+        }
         results.shipped++;
         results.noOrders = false;
+        // 返回 IM 列表页面，准备处理下一个订单
+        await page.goto(CONFIG.chatUrl, { waitUntil: 'domcontentloaded', timeout: CONFIG.timeout });
+        await sleep(3000);
 
       } catch (err) {
         log(`  ❌ 处理订单异常: ${err.message}`);
         results.errors.push(err.message);
+        // 出错也要尝试回到列表页
+        try { await page.goto(CONFIG.chatUrl, { waitUntil: 'domcontentloaded', timeout: 10000 }); await sleep(2000); } catch {}
       }
     }
 
