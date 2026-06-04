@@ -529,167 +529,183 @@ async function main() {
           continue;
         }
 
-        // 此时应进入聊天详情，查找"去发货"按钮
-        const shipBtn = await page.$('text=去发货');
-        if (!shipBtn) {
-          // 尝试更宽泛的查找
-          const allBtns = await page.$$('button, [role="button"], a, span, div');
-          let found = false;
+        // 此时进入聊天详情，查找所有"去发货"按钮
+        // 一个买家可能有多个订单，每个未发货订单对应一个"去发货"按钮
+        const shipBtns = await page.$$('button.msg-dx-button--UaR60azu');
+        const actualBtns = [];
+        for (const btn of shipBtns) {
+          const t = await btn.textContent();
+          if (t && t.trim() === '去发货') actualBtns.push(btn);
+        }
+
+        // 也尝试通用查找兜底
+        if (actualBtns.length === 0) {
+          const allBtns = await page.$$('button, [role="button"], a');
           for (const btn of allBtns) {
             const t = await btn.textContent();
-            if (t && t.trim() === '去发货') {
-              await btn.click();
-              await sleep(3000);
-              found = true;
-              break;
-            }
+            if (t && t.trim() === '去发货') actualBtns.push(btn);
           }
-          if (!found) {
-            log('  ⚠️ 未找到"去发货"按钮，跳过');
-            // 回到IM列表
-            await page.goto(CONFIG.chatUrl, { waitUntil: 'domcontentloaded', timeout: 10000 });
-            await sleep(2000);
-            continue;
-          }
-        } else {
-          await shipBtn.click();
-          await sleep(3000);
         }
 
-        // 检查是否打开了新标签页
-        const pages = context.pages();
-        const orderPage = pages[pages.length - 1];
-
-        // 从 URL 提取 orderId
-        const orderUrl = orderPage.url();
-        const orderIdMatch = orderUrl.match(/orderId=(\d+)/);
-        if (!orderIdMatch) {
-          log('  ⚠️ 无法从 URL 提取 orderId，跳过');
-          await orderPage.close();
-          continue;
-        }
-        const orderId = orderIdMatch[1];
-        log(`  📋 订单号: ${orderId}`);
-
-        // 检查订单是否已完成/已发货
-        const orderStatus = await checkOrderStatus(orderPage);
-        log(`  📊 订单状态: ${orderStatus}`);
-        if (orderStatus === 'completed' || orderStatus === 'shipped') {
-          log(`  ⏭️ 订单已完成/已发货，跳过`);
-          await orderPage.close();
+        if (actualBtns.length === 0) {
+          log('  ⚠️ 未找到"去发货"按钮，跳过');
           await page.goto(CONFIG.chatUrl, { waitUntil: 'domcontentloaded', timeout: 10000 });
           await sleep(2000);
           continue;
         }
 
-        // 从页面提取商品 ID
-        const orderPageText = await orderPage.evaluate(() => document.body.innerText || '');
-        let productId = null;
+        log(`  找到 ${actualBtns.length} 个"去发货"按钮`);
 
-        // 尝试从页面找到商品ID
-        for (const pid of Object.keys(PRODUCTS)) {
-          if (orderPageText.includes(pid) || orderUrl.includes(pid)) {
-            productId = pid;
-            break;
-          }
-        }
+        // 从最后一个开始处理 (最新订单在最下面)
+        for (let bi = actualBtns.length - 1; bi >= 0; bi--) {
+          const btn = actualBtns[bi];
+          let orderPage = null;
 
-        // 如果页面上没匹配到，用 URL 的参数
-        if (!productId) {
-          const itemIdMatch = orderUrl.match(/itemId=(\d+)/);
-          if (itemIdMatch && PRODUCTS[itemIdMatch[1]]) {
-            productId = itemIdMatch[1];
-          }
-        }
-
-        // 兜底：只有1个货品时，直接使用
-        if (!productId && activeProducts.length === 1) {
-          productId = activeProducts[0];
-          log(`  💡 仅1个货品，默认使用: ${PRODUCTS[productId].name}`);
-        }
-
-        if (!productId) {
-          log(`  ⚠️ 无法匹配到货品配置，跳过 (URL: ${orderUrl.slice(0, 100)})`);
-          await sendFeishu(`⚠️ 发现新订单但无法匹配货品\n订单号: ${orderId}\nURL: ${orderUrl.slice(0, 120)}`);
-          await orderPage.close();
-          continue;
-        }
-
-        const product = PRODUCTS[productId];
-        log(`  🏷️ 匹配货品: ${product.name} (${productId})`);
-
-        // === 调虚拟发货 API ===
-        log(`  🚚 调用虚拟发货 API...`);
-        const apiResult = await callShippingAPI(page, orderId);
-
-        if (apiResult.includes('SUCCESS') || apiResult.includes('ORDER_ALREADY_DELIVERY')) {
-          log(`  ✅ API 调用成功`);
-        } else {
-          log(`  ⚠️ API 调用异常: ${apiResult.slice(0, 200)}`);
-          await sendFeishu(
-            `⚠️ 闲鱼发货API异常\n` +
-            `订单号: ${orderId}\n` +
-            `货品: ${product.name}\n` +
-            `API返回: ${apiResult.slice(0, 300)}\n` +
-            `请手动确认发货状态`
-          );
-          await orderPage.close();
-          results.errors.push(`API失败: ${orderId}`);
-          continue;
-        }
-
-        // === 发送发货内容 ===
-        const deliveryMsg = await getDeliveryMessage(product, orderId);
-        if (deliveryMsg) {
-          log(`  💬 发送发货内容...`);
-
-          // 回到聊天页
-          const chatPage = pages[0]; // 聊天页始终是第一个
-          await chatPage.bringToFront();
-          await sleep(1000);
-
-          // 查找输入框并输入
           try {
-            const inputBox = await chatPage.$('textarea, input[type="text"], [contenteditable="true"], .chat-input, #chat-input');
-            if (inputBox) {
-              await inputBox.click();
-              await sleep(300);
-              await inputBox.fill(deliveryMsg);
-              await sleep(500);
-              // 尝试点击发送按钮
-              const sendBtn = await chatPage.$('button:has-text("发送"), [role="button"]:has-text("发送"), .send-btn');
-              if (sendBtn) {
-                await sendBtn.click();
-                log(`  ✅ 消息已发送`);
-              } else {
-                // 尝试 Enter 发送
-                await chatPage.keyboard.press('Enter');
-                log(`  ✅ 已按 Enter 发送`);
-              }
-            } else {
-              log(`  ⚠️ 未找到输入框`);
+            // 滚动到按钮可见
+            await btn.scrollIntoViewIfNeeded();
+            await sleep(500);
+            await btn.click();
+            await sleep(3000);
+
+            // 检查是否打开了新标签页
+            const pages = context.pages();
+            orderPage = pages[pages.length - 1];
+
+            // 从 URL 提取 orderId
+            const orderUrl = orderPage.url();
+            const orderIdMatch = orderUrl.match(/orderId=(\d+)/);
+            if (!orderIdMatch) {
+              log(`  按钮${bi + 1}: 无法从 URL 提取 orderId，跳过`);
+              await orderPage.close();
+              continue;
             }
-          } catch (e) {
-            log(`  ⚠️ 发送消息失败: ${e.message}`);
+            const orderId = orderIdMatch[1];
+            log(`  按钮${bi + 1}: 订单号 ${orderId}`);
+
+            // 检查订单是否已完成/已发货
+            const orderStatus = await checkOrderStatus(orderPage);
+            log(`  订单状态: ${orderStatus}`);
+            if (orderStatus === 'completed' || orderStatus === 'shipped') {
+              log(`  ⏭️ 已发货/已完成，跳过`);
+              await orderPage.close();
+              continue;
+            }
+
+            // 从页面提取商品 ID
+            const orderPageText = await orderPage.evaluate(() => document.body.innerText || '');
+            let productId = null;
+
+            for (const pid of Object.keys(PRODUCTS)) {
+              if (orderPageText.includes(pid) || orderUrl.includes(pid)) {
+                productId = pid;
+                break;
+              }
+            }
+
+            if (!productId) {
+              const itemIdMatch = orderUrl.match(/itemId=(\d+)/);
+              if (itemIdMatch && PRODUCTS[itemIdMatch[1]]) {
+                productId = itemIdMatch[1];
+              }
+            }
+
+            if (!productId && activeProducts.length === 1) {
+              productId = activeProducts[0];
+              log(`  💡 仅1个货品，默认: ${PRODUCTS[productId].name}`);
+            }
+
+            if (!productId) {
+              log(`  ⚠️ 无法匹配货品配置，跳过`);
+              await sendFeishu(`⚠️ 发现新订单但无法匹配货品\n订单号: ${orderId}\nURL: ${orderUrl.slice(0, 120)}`);
+              await orderPage.close();
+              continue;
+            }
+
+            const product = PRODUCTS[productId];
+            log(`  🏷️ ${product.name} (${productId})`);
+
+            // === 调虚拟发货 API ===
+            log(`  🚚 调用虚拟发货 API...`);
+            const apiResult = await callShippingAPI(page, orderId);
+
+            if (apiResult.includes('SUCCESS') || apiResult.includes('ORDER_ALREADY_DELIVERY')) {
+              log(`  ✅ API 调用成功`);
+            } else {
+              log(`  ⚠️ API 异常: ${apiResult.slice(0, 200)}`);
+              await sendFeishu(
+                `⚠️ 闲鱼发货API异常\n` +
+                `订单号: ${orderId}\n` +
+                `货品: ${product.name}\n` +
+                `API返回: ${apiResult.slice(0, 300)}\n` +
+                `请手动确认发货状态`
+              );
+              await orderPage.close();
+              results.errors.push(`API失败: ${orderId}`);
+              continue;
+            }
+
+            // === 发送发货内容 ===
+            const deliveryMsg = await getDeliveryMessage(product, orderId);
+            if (deliveryMsg) {
+              log(`  💬 发送发货内容...`);
+
+              // 回到聊天页并重新打开对话
+              const chatPage = pages[0];
+              await chatPage.bringToFront();
+              await sleep(500);
+
+              // 刷新IM页面确保聊天UI正常
+              await chatPage.goto(CONFIG.chatUrl, { waitUntil: 'domcontentloaded', timeout: 15000 });
+              await sleep(3000);
+
+              // 重新点击该对话
+              const cvItems = await chatPage.$$('[class*="conversation-item"]');
+              for (const cv of cvItems) {
+                const t = await cv.textContent();
+                if (t && (t.includes('等待卖家发货') || t.includes('等待你发货') || t.includes('等待买家收货'))) {
+                  await cv.click();
+                  await sleep(3000);
+                  break;
+                }
+              }
+
+              try {
+                // 点击聊天底部区域让输入框获得焦点
+                await chatPage.mouse.click(800, 720);
+                await sleep(500);
+                // 用键盘直接输入
+                await chatPage.keyboard.type(deliveryMsg, { delay: 50 });
+                await sleep(500);
+                await chatPage.keyboard.press('Enter');
+                log(`  ✅ 消息已发送`);
+              } catch (e) {
+                log(`  ⚠️ 发送失败: ${e.message}`);
+              }
+            }
+
+            if (!orderPage.isClosed()) {
+              await orderPage.close();
+            }
+            results.shipped++;
+            results.noOrders = false;
+
+          } catch (err) {
+            log(`  ❌ 按钮${bi + 1}处理异常: ${err.message}`);
+            results.errors.push(err.message);
+            if (orderPage && !orderPage.isClosed()) {
+              try { await orderPage.close(); } catch {}
+            }
           }
-        } else {
-          log(`  ⚠️ 无法生成发货内容 (可能是秘钥池已空或API无响应)`);
         }
 
-        // 关闭订单详情页，回到 IM 列表
-        if (!orderPage.isClosed()) {
-          await orderPage.close();
-        }
-        results.shipped++;
-        results.noOrders = false;
-        // 返回 IM 列表页面，准备处理下一个订单
+        // 处理完回 IM 列表
         await page.goto(CONFIG.chatUrl, { waitUntil: 'domcontentloaded', timeout: CONFIG.timeout });
         await sleep(3000);
 
       } catch (err) {
         log(`  ❌ 处理订单异常: ${err.message}`);
         results.errors.push(err.message);
-        // 出错也要尝试回到列表页
         try { await page.goto(CONFIG.chatUrl, { waitUntil: 'domcontentloaded', timeout: 10000 }); await sleep(2000); } catch {}
       }
     }
