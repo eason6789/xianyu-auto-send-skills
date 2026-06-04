@@ -3,6 +3,7 @@ name: xianyu-auto-fulfill
 description: >
   闲鱼多货品自动发货系统 (CLI版) — 0 Token 消耗，纯本地 Playwright 脚本驱动。
   支持多货品配置表、多种发货方式、风控自动检测+通知。
+  支持同买家多订单、自动状态检测、键盘输入发送消息。
 triggers:
   - 闲鱼发货
   - 闲鱼自动发货
@@ -82,7 +83,7 @@ cd /opt/xianyu && ./start.sh
 ### 6. Cron 自动执行
 
 ```bash
-*/5 * * * * /opt/xianyu/start.sh >> /tmp/xianyu-cron.log 2>&1
+*/5 * * * * /root/xianyu/start.sh >> /tmp/xianyu-cron.log 2>&1
 ```
 
 ## 系统架构
@@ -98,11 +99,17 @@ Cron (每N分钟) → start.sh
   │   └─ 正常 → 继续
   ├─ ④ 扫描"等待你发货"订单
   │   └─ 无 → 结束
-  └─ ⑤ 逐一处理每个订单：
-       ├─ 点击"去发货" → 提取 orderId
-       ├─ 从页面提取 productId → 查 products.json
+  └─ ⑤ 逐一处理每个会话：
+       ├─ 点击会话 → 查找所有"去发货"按钮 (支持同买家多订单)
+       ├─ 从最新到最旧处理每个按钮
+       ├─ 点击"去发货" → 打开订单详情
+       ├─ 检测订单状态 (已完成→跳过 / 待发货→处理)
+       ├─ 提取 orderId → 匹配 products.json
        ├─ 调用 MTop 虚拟发货 API
-       └─ 按货品配置发送内容给买家
+       │   └─ 使用 Playwright request.newContext(storageState) 共享认证态
+       ├─ 刷新IM页面 → 重新进入对话
+       ├─ 通过 textarea 输入框发送发货内容给买家
+       └─ 飞书通知发货结果
 ```
 
 ## 关键技术点
@@ -118,9 +125,30 @@ sign = MD5(token + "&" + timestamp + "&" + appKey + "&" + data)
 token = _m_h5_tk cookie 中 "_" 前面的部分
 ```
 
-### 通知机制
-- 主通道: 飞书机器人 API (tenant_access_token → im/v1/messages)
-- 兜底通道: Webhook + 本地日志文件
+### API 认证 (关键！)
+使用 Playwright 的 `request.newContext({ storageState })` 共享浏览器登录态，而不是手动拼接 Cookie。这是解决 `SESSION_EXPIRED` 的核心方法。
+
+```javascript
+const { chromium, request } = require('playwright');
+const storageState = await page.context().storageState();
+const apiContext = await request.newContext({ storageState });
+const resp = await apiContext.post(mtopUrl, { headers, data });
+```
+
+### 同买家多订单处理
+一个买家可能多次购买同一商品，每个未发货订单在聊天中都有一个"去发货"按钮。脚本通过 class `msg-dx-button--UaR60azu` 定位所有按钮，从最后一个（最新订单）开始处理。
+
+### 订单状态检测
+打开订单详情页后，检测页面内容判断订单状态：
+- 出现「去评价」→ 已完成，跳过
+- 出现「已发货」「交易成功」→ 已发货，跳过
+- 出现「去发货」→ 待发货，继续处理
+
+### 消息发送
+闲鱼聊天输入框是 `<textarea class="textarea-no-border--...">`，通过 `textarea.fill()` 填入内容后按 Enter 发送。
+
+### 浏览器 Profile 隔离
+首次运行自动从旧 Profile 复制登录态到专属目录（过滤 Singleton 锁文件），避免与 OpenClaw 等工具的 Chrome 进程冲突。
 
 ## 新增货品步骤
 

@@ -671,14 +671,31 @@ async function main() {
               }
 
               try {
-                // 点击聊天底部区域让输入框获得焦点
-                await chatPage.mouse.click(800, 720);
-                await sleep(500);
-                // 用键盘直接输入
-                await chatPage.keyboard.type(deliveryMsg, { delay: 50 });
-                await sleep(500);
-                await chatPage.keyboard.press('Enter');
-                log(`  ✅ 消息已发送`);
+                // 找到输入框 (闲鱼聊天用的是 textarea.textarea-no-border)
+                const textarea = await chatPage.$('textarea, [class*="textarea-no-border"]');
+                if (textarea) {
+                  await textarea.click();
+                  await sleep(300);
+                  await textarea.fill(deliveryMsg);
+                  await sleep(500);
+                  // 点击发送按钮或 Enter
+                  const sendBtn = await chatPage.$('[class*="send-btn"], [class*="send-button"], button:has-text("发送")');
+                  if (sendBtn) {
+                    await sendBtn.click();
+                  } else {
+                    await chatPage.keyboard.press('Enter');
+                  }
+                  log(`  ✅ 消息已发送`);
+                } else {
+                  // 兜底：鼠标点击 + 键盘输入
+                  log(`  ⚠️ 未找到textarea，尝试键盘输入...`);
+                  await chatPage.mouse.click(800, 670);
+                  await sleep(500);
+                  await chatPage.keyboard.type(deliveryMsg, { delay: 50 });
+                  await sleep(500);
+                  await chatPage.keyboard.press('Enter');
+                  log(`  ✅ 消息已发送(键盘)`);
+                }
               } catch (e) {
                 log(`  ⚠️ 发送失败: ${e.message}`);
               }
