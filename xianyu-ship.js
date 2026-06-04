@@ -170,14 +170,25 @@ async function sendFeishu(text) {
 // ===================== 浏览器 =====================
 
 async function launchBrowser() {
-  // 优先使用旧 OpenClaw 的 profile (已有登录态)，否则用新 profile
-  let profileDir = CONFIG.legacyProfile;
-  if (!fs.existsSync(profileDir)) {
-    profileDir = CONFIG.userDataDir;
-    log('🆕 使用新浏览器 profile (首次需手动登录)');
+  const xianyuProfile = CONFIG.userDataDir;
+
+  // 首次运行：从旧 profile 复制登录态到 xianyu 专属目录 (避免与 OpenClaw 锁冲突)
+  if (!fs.existsSync(xianyuProfile) && CONFIG.legacyProfile && fs.existsSync(CONFIG.legacyProfile)) {
+    log('📋 首次运行，从旧 profile 复制登录态...');
+    try {
+      fs.cpSync(CONFIG.legacyProfile, xianyuProfile, { recursive: true,
+        filter: (src) => !src.includes('Singleton') });
+      log('✅ 登录态已复制到专属目录');
+    } catch (e) {
+      log(`⚠️ 复制失败: ${e.message}，将使用新 profile`);
+    }
   }
 
-  const context = await chromium.launchPersistentContext(profileDir, {
+  if (!fs.existsSync(xianyuProfile)) {
+    log('🆕 使用全新浏览器 profile (首次需手动登录)');
+  }
+
+  const context = await chromium.launchPersistentContext(xianyuProfile, {
     executablePath: CONFIG.chromePath,
     headless: false,
     args: [
