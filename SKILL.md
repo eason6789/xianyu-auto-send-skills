@@ -37,7 +37,18 @@ npm install playwright
 scp xianyu-ship.js start.sh products.json root@YOUR_SERVER:/opt/xianyu/
 ```
 
-### 2. 配置货品 (products.json)
+### 2. 配置敏感信息 (config.local.json)
+
+```json
+{
+  "legacyProfile": "/path/to/existing/browser/profile",
+  "feishuAppId": "cli_xxxxxxxxxxxxxx",
+  "feishuAppSecret": "xxxxxxxxxxxxxxxxxxxxxx",
+  "feishuChatId": "oc_xxxxxxxxxxxxxxxxxxxxxx"
+}
+```
+
+### 3. 配置货品 (products.json)
 
 ```json
 {
@@ -53,7 +64,7 @@ scp xianyu-ship.js start.sh products.json root@YOUR_SERVER:/opt/xianyu/
 }
 ```
 
-### 3. 支持的发货方式
+### 4. 支持的发货方式
 
 | type | 说明 | 配置示例 |
 |------|------|---------|
@@ -62,13 +73,13 @@ scp xianyu-ship.js start.sh products.json root@YOUR_SERVER:/opt/xianyu/
 | `keypool` | 秘钥池 (每单消耗一行) | `{"type":"keypool","keypoolFile":"keys.txt"}` |
 | `api` | 调用外部API获取内容 | `{"type":"api","apiUrl":"http://..."}` |
 
-### 4. 手动执行
+### 5. 手动执行
 
 ```bash
 cd /opt/xianyu && ./start.sh
 ```
 
-### 5. Cron 自动执行
+### 6. Cron 自动执行
 
 ```bash
 */5 * * * * /opt/xianyu/start.sh >> /tmp/xianyu-cron.log 2>&1
@@ -126,4 +137,5 @@ token = _m_h5_tk cookie 中 "_" 前面的部分
 | `xianyu-ship.js` | 主脚本，包含完整发货逻辑 |
 | `start.sh` | 启动脚本，管理 Xvfb + 环境变量 |
 | `products.json` | 货品配置表（多商品支持） |
+| `config.local.json` | 本地敏感配置（不入 git） |
 | `keys-*.txt` | 秘钥池文件（可选，按需创建） |
